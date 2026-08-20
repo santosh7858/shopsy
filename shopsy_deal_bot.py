@@ -34,12 +34,12 @@ ADMITAD_BASE_LINK = os.getenv("ADMITAD_BASE_LINK")
 # --- GITHUB DUP-CHECK CONFIGURATION ---
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 REPO_OWNER = os.getenv("REPO_OWNER")
-REPO_NAME = os.getenv("REPO_NAME")
+foldername = os.getenv("foldername")
 GITHUB_FILE_PATH = os.getenv("GITHUB_FILE_PATH", "sent_products.txt")
 
-if GITHUB_TOKEN and REPO_OWNER and REPO_NAME:
-    GITHUB_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{GITHUB_FILE_PATH}"
-    GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/{GITHUB_FILE_PATH}"
+if GITHUB_TOKEN and REPO_OWNER and foldername:
+    GITHUB_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{foldername}/contents/{GITHUB_FILE_PATH}"
+    GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{REPO_OWNER}/{foldername}/main/{GITHUB_FILE_PATH}"
     GITHUB_HEADERS = {
         "Authorization": f"token {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json"
