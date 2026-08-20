@@ -9,11 +9,62 @@ import json
 import sys
 import base64
 import traceback
+import collections
+import threading
+from urllib.parse import urlparse, parse_qs
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
+
+# ==================== LOG CAPTURE & RENDER SERVER ====================
+# Memory buffer saving last 800 log lines (Limit rakhi hai taaki RAM na bhare)
+log_buffer = collections.deque(maxlen=800)
+
+class OutputCapturer:
+    """Redirects print output to memory buffer instead of live terminal."""
+    def write(self, text):
+        log_buffer.append(text)
+        # Original stream pe nahi bhej rahe = Live terminal silent rahega
+
+    def flush(self):
+        pass
+
+# Redirect standard output and errors to custom capturer
+sys.stdout = OutputCapturer()
+sys.stderr = OutputCapturer()
+
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed_url = urlparse(self.path)
+        query_params = parse_qs(parsed_url.query)
+
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.end_headers()
+
+        if query_params.get('logs') == ['logs']:
+            # ?logs=logs URL me ho toh buffer show karega
+            logs_text = "".join(log_buffer)
+            html = f"<html><body style='background:#121212;color:#00FF00;font-family:monospace;padding:20px;'><pre>{logs_text}</pre></body></html>"
+            self.wfile.write(html.encode('utf-8'))
+        else:
+            # Normal visit pe simple status dikhayega
+            self.wfile.write(b"Shopsy Bot is Running Active. Use /?logs=logs to view live status.")
+            
+    def log_message(self, format, *args):
+        pass # Server access logs ko terminal pe aane se rokna
+
+def run_dummy_server():
+    """Render Web Service port requirement ko satisfy karne ke liye dummy server"""
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), DummyHandler)
+    print(f"[*] Started dummy web server on port {port} to satisfy Render.")
+    server.serve_forever()
+# =====================================================================
+
 
 # --- STRICT ENVIRONMENT VARIABLES (No Hardcoded Secrets) ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -34,12 +85,12 @@ ADMITAD_BASE_LINK = os.getenv("ADMITAD_BASE_LINK")
 # --- GITHUB DUP-CHECK CONFIGURATION ---
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 REPO_OWNER = os.getenv("REPO_OWNER")
-foldername = os.getenv("foldername")
+REPO_NAME = os.getenv("REPO_NAME")
 GITHUB_FILE_PATH = os.getenv("GITHUB_FILE_PATH", "sent_products.txt")
 
-if GITHUB_TOKEN and REPO_OWNER and foldername:
-    GITHUB_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{foldername}/contents/{GITHUB_FILE_PATH}"
-    GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{REPO_OWNER}/{foldername}/main/{GITHUB_FILE_PATH}"
+if GITHUB_TOKEN and REPO_OWNER and REPO_NAME:
+    GITHUB_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{GITHUB_FILE_PATH}"
+    GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/{GITHUB_FILE_PATH}"
     GITHUB_HEADERS = {
         "Authorization": f"token {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json"
@@ -137,23 +188,34 @@ def save_sent_id_to_github(pid, current_set):
     return False
 
 def get_optimized_driver():
-    """Starts a headless Chrome browser optimized for Docker & memory stability."""
+    """Starts a headless Chrome browser optimized for extreme 512MB RAM stability."""
     chrome_options = Options()
+    
+    # Eager loading: Page doesn't wait for images/CSS to download before continuing
+    chrome_options.page_load_strategy = 'eager'
+    
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
+    
+    # RAM Saving Aggressive Flags
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--no-zygote")
     chrome_options.add_argument("--disable-site-isolation-trials")
-    chrome_options.add_argument("--js-flags=--max-old-space-size=256")
+    chrome_options.add_argument("--js-flags=--max-old-space-size=128") # JS RAM limit low
+    chrome_options.add_argument("--disk-cache-size=10485760") # Very small disk cache
+    chrome_options.add_argument("--disable-logging")
+    chrome_options.add_argument("--mute-audio")
+    
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
     prefs = {
         "profile.managed_default_content_settings.images": 2,
         "profile.managed_default_content_settings.stylesheet": 2,
-        "profile.managed_default_content_settings.fonts": 2
+        "profile.managed_default_content_settings.fonts": 2,
+        "profile.managed_default_content_settings.media_stream": 2
     }
     chrome_options.add_experimental_option("prefs", prefs)
 
@@ -308,10 +370,9 @@ def fetch_deals_and_process(active_urls):
         try:
             driver = get_optimized_driver()
             
-            # 3 pages tak check karenge taaki 10 unique unseen products mil sakein
             for page_num in range(1, 4):
                 if products_processed >= 10:
-                    break # 10 products pure hone par loop break karein
+                    break
 
                 print(f"[*] Page {page_num}...")
                 paged_url = f"{cat_url}&page={page_num}" if "?" in cat_url else f"{cat_url}?page={page_num}"
@@ -322,11 +383,15 @@ def fetch_deals_and_process(active_urls):
                 pattern = r'(/[a-zA-Z0-9\-]+/p/itm[a-zA-Z0-9]+)'
                 raw_links = list(set(re.findall(pattern, page_source)))
                 
+                # Free memory immediately
+                del page_source 
+                gc.collect()
+
                 print(f"[+] Found {len(raw_links)} product candidates on Page {page_num}.")
 
                 for partial_link in raw_links:
                     if products_processed >= 10:
-                        break # Yahan bhi limit check karein taaki 10 ke baad process na ho
+                        break
 
                     try:
                         pid = extract_pid_from_url(partial_link)
@@ -339,14 +404,20 @@ def fetch_deals_and_process(active_urls):
                         driver.get(full_url)
                         time.sleep(2)
                         
-                        products_processed += 1 # Product process count badhayein
+                        products_processed += 1
                         print(f"   [{products_processed}/10] Checking: {title[:25]}...")
                         
                         soup = BeautifulSoup(driver.page_source, 'html.parser')
                         body_text = soup.get_text(separator=' ')
                         
                         prices_found = re.findall(r'₹([0-9,]+)', body_text)
+                        
+                        # Extreme Memory Saving: Delete heavy variables immediately after use
+                        del body_text 
+                        
                         if not prices_found: 
+                            del soup
+                            gc.collect()
                             continue
                         
                         clean_prices = [float(p.replace(',', '')) for p in prices_found]
@@ -359,10 +430,8 @@ def fetch_deals_and_process(active_urls):
                                 break
                         
                         discount_val = 0
-                        discount_match = re.search(r'([0-9]+)%\s*off', body_text, re.IGNORECASE)
-                        if discount_match:
-                            discount_val = int(discount_match.group(1))
-                        elif original_price > selling_price:
+                        
+                        if original_price > selling_price:
                             discount_val = int(((original_price - selling_price) / original_price) * 100)
                         
                         if original_price == 0 and discount_val > 0:
@@ -396,10 +465,14 @@ def fetch_deals_and_process(active_urls):
                             category_deals.append({'deal': deal_data, 'pid': pid})
                             print(f"      -> Valid Deal Added: ₹{selling_price} | {discount_val}% OFF")
                             
+                        # Memory cleanup at loop end
+                        del soup
+                        gc.collect()
+                            
                     except Exception as item_err:
+                        gc.collect()
                         continue
             
-            # Jab 10 products process ho jayein (ya deals mil jayein), tab sabse best select karein
             if category_deals:
                 category_deals.sort(key=lambda x: x['deal']['price'])
                 best_item = category_deals[0]
@@ -418,7 +491,7 @@ def fetch_deals_and_process(active_urls):
                 time.sleep(POST_INTERVAL_SECONDS)
             else:
                 print(f"\n[-] No valid deals (>50% off) found in the {products_processed} products checked. Switching Category...")
-                time.sleep(5) # Agar koi deal nahi mili toh immediately next category par jayein
+                time.sleep(5)
                     
         except Exception as e:
             print(f"[!] Scraper Category Error: {e}")
@@ -429,19 +502,17 @@ def fetch_deals_and_process(active_urls):
             gc.collect()
 
 def main():
+    # 1. Start Server in Background Thread
+    server_thread = threading.Thread(target=run_dummy_server, daemon=True)
+    server_thread.start()
+
     print("=" * 60)
-    print("🚀 Shopsy Deal Bot (Strict Environment Mode)")
+    print("🚀 Shopsy Deal Bot (Silent Render Web Service Mode)")
     print("=" * 60)
 
     user_search = os.getenv("SEARCH_KEYWORDS", "").strip()
-    
-    if not user_search and sys.stdin.isatty():
-        try:
-            user_search = input("🔍 Enter custom keywords (comma separated) or press ENTER for default: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            user_search = ""
-
     active_urls = []
+    
     if user_search:
         keywords = [k.strip() for k in user_search.split(',')]
         for kw in keywords:
@@ -460,7 +531,6 @@ def main():
             time.sleep(POST_INTERVAL_SECONDS)
         except Exception as crash_err:
             print(f"\n[!] Unexpected Error trapped (Anti-Crash active): {crash_err}")
-            traceback.print_exc()
             print("[!] Restarting cycle in 30 seconds...")
             time.sleep(30)
 
