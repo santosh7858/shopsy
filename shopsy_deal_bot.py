@@ -440,7 +440,7 @@ def fetch_deals_and_process(active_urls):
                         if original_price == 0:
                             original_price = selling_price
 
-                        if discount_val >= 50:
+                        if discount_val >= 20:
                             full_details, features, images_str = extract_product_details(soup)
                             ai_context = (
                                 f"Product Name: {title}\n"
